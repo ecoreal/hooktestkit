@@ -5,6 +5,24 @@
 
 import { spawn } from "node:child_process";
 
+// Windows does not propagate signals: killing `sh` leaves every process it
+// spawned alive, holding the stdio pipes open forever. Kill the whole tree.
+function killTree(child) {
+  if (process.platform === "win32" && child.pid) {
+    try {
+      spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+      return;
+    } catch {
+      /* fall through to signal kill */
+    }
+  }
+  try {
+    child.kill("SIGKILL");
+  } catch {
+    /* already gone */
+  }
+}
+
 export function runHook(command, payload, { timeout = 60, cwd = process.cwd(), env } = {}) {
   return new Promise((resolve) => {
     const start = performance.now();
@@ -22,8 +40,9 @@ export function runHook(command, payload, { timeout = 60, cwd = process.cwd(), e
       settled = true;
       clearTimeout(timer);
       // kill the hook tree on settle — hooks that exit may leave grandchildren
-      // (sleep, servers) alive, and nothing here may outlive the harness
-      try { child.kill("SIGKILL"); } catch {}
+      // (sleep, servers) alive holding our stdio pipes, and nothing here may
+      // outlive the harness
+      killTree(child);
       try { child.stdout.destroy(); child.stderr.destroy(); child.stdin.destroy(); } catch {}
       resolve({ ok: true, ms: Math.round(performance.now() - start), ...r });
     };
